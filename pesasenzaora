@@ -1,0 +1,349 @@
+//Created by Giuseppe Tamanini 01/01/2021
+//Licenza CC/SA
+
+//include la libreria che gestisce il basso consumo di arduino
+#include "LowPower.h"
+
+// Configura il pin 2 come pin da mettere a massa per avviare l’interrupt
+const int wakeUpPin = 2;
+
+//include la libreria che gestisce il modulo HX711
+#include "HX711.h"
+
+// HX711 circuit wiring
+const int LOADCELL_DOUT_PIN = 5;
+const int LOADCELL_SCK_PIN = 6;
+const int buzzer = 8; //pin dove è collegato il buzzer
+HX711 scale;
+
+//include la libreria che gestisce il display HT16K33
+#include "HT16K33.h"
+
+HT16K33 seg(0x70);
+
+int mis; // misura del peso
+int oldmis; // vecchia misura del peso
+boolean misinfun; // si sta usando la pesa
+int mn = 0; // min count down
+int ss; // secondi
+int oldss; // vecchio valore dei secondi
+long timeColon; // tempo per il lampeggio dei :
+boolean VisPesa = false; // visualizza pesa
+boolean VisCD = false; // visualizza count down
+boolean VisCU = false; // visualizza count up
+boolean CU; // è attivo il count up
+boolean minset; // è attivo quando si stanno impostando i minuti
+boolean CD; // è attivo il count down
+const int led1 = 10; // pin led1
+const int led2 = 11; // pin led2
+const int button1Pin = 3; // pin a cui sono collegati i touch
+const int button2Pin = 4;
+const int hx711Pin = 7; // pin di alimentazione del modulo HX711
+boolean button1State; // memorizza lo stato dei touch
+boolean button2State;
+boolean oldbutton1State; // memorizza lo stato prededente dei touch
+boolean oldbutton2State;
+long timepressedInButton1; // tempo in cui viene premuto uno o due touch
+long timepressedInButton2;
+long timepressedButton1; // tempo di premuta dei touch
+long timepressedButton2;
+boolean buttonPressed; // C'è un un touch premuto?
+long timeNotPressed; // tempo che calcola per quanto non viene premuto nessun pulsante
+boolean upupaOff; // se viene premuto il touch 3 del timer interrompe il suono upupa
+unsigned long timep;
+
+void wakeUp() {
+    // procedura che legge il pin di interrupt
+}
+
+void setup() {
+
+  Serial.begin(115200);
+  // configuriamo il pin di interrupt in ingresso
+  pinMode(wakeUpPin, INPUT);
+    
+  pinMode(button1Pin, INPUT); // inizializza i pin di input
+  pinMode(button2Pin, INPUT);
+
+  pinMode(led1, OUTPUT); // inizializza i pin dove sono collegati i led
+  pinMode(led2, OUTPUT);
+  pinMode(hx711Pin, OUTPUT); // inizializza il pin dove è collegata l'alimentazione del modulo HX711
+  seg.begin(); // inizializza il display
+  Wire.setClock(100000);
+  seg.displayOn();
+  seg.displayClear();
+  seg.brightness(15);
+
+  // inizializza il modulo HX711 per la lettura del peso
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(395.f);    // imposta la scala
+  scale.tare();              // resetta la scala
+  delay(1000);
+  scale.tare();              // resetta la scala
+  timeColon = millis(); // tempo di accensione dei due punti (:)
+  
+  attachInterrupt(0, wakeUp, LOW); // configura il pin 2 (interrupt 0) per risvegliare Arduino quando portato a massa
+  LowPower.powerDown(SLEEP_FOREVER, ADC_OFF, BOD_OFF); // mette Arduino in modalità basso consumo
+  
+}
+
+void loop() {
+
+  detachInterrupt(digitalPinToInterrupt(wakeUpPin)); // se il pin 2 viene messo a massa risveglia Arduino ed esegue il programma
+
+  digitalWrite(led1, HIGH); // accende i led
+  digitalWrite(led2, HIGH);
+  digitalWrite(hx711Pin, HIGH); // accende il modulo HX711
+  
+  buttonpress();
+
+  if (button1State && oldbutton1State == false) { // se è premuto il touch1 avvia il conto del tempo di premuta
+    oldbutton1State = true;
+    timepressedInButton1 = millis();
+  }
+  if (button1State == LOW && oldbutton1State) { // quando il touch1 viene rilasciato calcola il tempo di premuta
+    timepressedButton1 = millis() - timepressedInButton1;
+    oldbutton1State = false;
+  }  
+  if (timepressedButton1 > 250 && VisPesa) { // se il touch1 è stato premuto per più di 250 ms e sta funzionando la pesa vie eseguita la tara
+    timepressedButton1 = 0;
+    scale.tare(); // esegue la tara    
+  }
+  if (timepressedButton1 > 250) { // se il touch1 è stato premuto per più di 250 ms accende la pesa
+    timepressedButton1 = 0;
+    scale.power_up(); // accende l'HX711
+    VisPesa = true;
+    VisCD = false;
+    VisCU = false;
+  }
+  if (button2State && oldbutton2State == false) {  // se è premuto il touch2 avvia il conto del tempo di premuta
+    oldbutton2State = true;
+    timepressedInButton2 = millis();
+  }
+  if (button2State == LOW && oldbutton2State) {  // quando il touch2 viene rilasciato calcola il tempo di premuta
+    timepressedButton2 = millis() - timepressedInButton2;
+    Serial.println(timepressedButton2);
+    oldbutton2State = false;
+  }
+  if (timepressedButton2 > 250 && VisCD == false && CD == false && VisCU == false && CU == false) { // se il touch2 è stato premuto per più di 255 ms visualizza 00:00 e attende la scelta successiva
+    timepressedButton2 = 0;
+    Serial.println("minset");
+    mn = 0;
+    minset = true; // la modalità set è attiva
+    seg.suppressLeadingZeroPlaces(0);
+    seg.displayTime(mn, 0);
+    seg.displayColon(true);
+    VisPesa = false;
+    CU = true;
+  }
+  if (timepressedButton2 > 25 && minset && VisCD == false) { // se il touch2 è stato premuto per più di 25 ms e è attiva countdownset aumenta i minuti del count down
+    timepressedButton2 = 0;
+    Serial.println("minset+");
+    VisCU = false;
+    CU = false;
+    CD = false;
+    mn = mn + 1;
+    seg.displayTime(mn, 0);
+    seg.displayColon(true);
+  }
+  if (millis() - timeNotPressed > 10000 && buttonPressed == false && VisPesa && misinfun == false) { // se non è stato premuto nessun touch per 10 sec e non ci sono variazioni di misura spegne la pesa
+    if (CU) VisCU = true;
+    if (CD) VisCD = true;
+    if (VisCU == false && VisCD == false) seg.displayClear();
+    VisPesa = false;
+  }
+  if (millis() - timeNotPressed > 3000 && buttonPressed == false && VisCU == false && CU && CD == false && minset) { // se non si sono impostati i minuti e non è stato premuto alcun touch per 3 sec avvia il count up
+    VisPesa = false;
+    VisCU = true;
+    minset = false;
+    timeColon = millis();
+    seg.displayTime(mn,0);
+    timep = millis();
+    Serial.println(timep);
+  }  
+  if (millis() - timeNotPressed > 3000 && buttonPressed == false && VisCD == false && CU == false && CD == false && minset) { // se sono stati impostati i minuti e non è stato premuto nessun touch per più di 3 sec avvia il coun down
+    VisPesa = false;
+    VisCD = true;
+    CD = true;
+    minset = false;
+    timeColon = millis();
+    seg.displayTime(mn,0);
+    timep = millis();
+  }
+  if (timepressedButton2 > 3000 && (VisCD || VisCU)) { // se il touch2 è stato premuto per più di 3 sec ed è in corso il count down o il count up spegne il count
+    timepressedButton2 = 0;
+    Serial.println("spegne il CU/CD)");
+    mn = 0;
+    VisCD = false; // spegne il count down
+    VisCU = false;
+    CD = false;
+    CU = false;
+    seg.displayClear(); // spegne il display
+  }
+  if (millis() - timeNotPressed > 20000 && buttonPressed == false && VisPesa == false && VisCU == false && VisCD == false) { // se non è stato premuto nessun touch per 20 sec e non è in funzione la pesa, il CD o il CU mette Arduino in modalità basso consumo 
+    digitalWrite(led1, LOW); // accende i led
+    digitalWrite(led2, LOW);
+    digitalWrite(hx711Pin, LOW); // accende il modulo HX711
+    attachInterrupt(0, wakeUp, LOW);
+    LowPower.powerDown(SLEEP_FOREVER, ADC_OFF, BOD_OFF);    
+  }
+  if (VisPesa && CD && mn == 0 && ss < 10) {
+    VisPesa = false; // chiude la procedura della pesa
+    VisCD = true; // avvia la procedura del count down
+  } else if (VisPesa) {
+    if (CD) dispCD();
+    if (CU) dispCU();
+    dispPesa();
+  }
+  if (VisCD) dispCD();
+  if (VisCU) {
+    dispCU();
+  }
+}
+
+void buttonpress() {
+  button1State = digitalRead(button1Pin);
+  button2State = digitalRead(button2Pin);
+  if (button1State) {
+    buttonPressed = true;
+  } else if (button2State) {
+    buttonPressed = true;
+  } else if (buttonPressed == true) { // se non è premuto nessun touch e in precedenza è stato premuto un touch
+    timeNotPressed = millis(); // calcola il tempo di non premuta
+    buttonPressed = false; // non è premuto nessun touch
+  }
+}
+
+void dispCD() {  //CountDown
+  seg.suppressLeadingZeroPlaces(0); // visualizza gli zeri non significativi
+
+  if (CD) { // se è in funzione il count down
+    if (millis() - timeColon > 500) { // fa lampeggiare i : ogni mezzo secondo
+      seg.displayColon(false);
+    } else {
+      seg.displayColon(true);
+    }
+    ss = (millis() - timep) / 1000;
+    Serial.println(ss);    
+    ss = 59 - (ss - ss / 60 * 60);
+    Serial.println(ss);
+    if (ss != oldss) { //se è passato un secondo
+      if (ss == 59 && mn > 0) { // quando i sec arrivano a 59 diminuisce i minuti
+        mn = mn - 1;
+      }
+      if (VisCD) seg.displayTime(mn, ss); // se è attiva la visualizzazione del count down lo visualizza
+      oldss = ss;
+      timeColon = millis();
+    }
+  }
+  
+  if (VisCD && mn == 0 && ss == 0) { // se è attiva la visualizzazione del count down quando min e sec del conut down arrivano a 0 avvia la procedura che emette i bip
+    seg.displayColon(true);
+    mn = 0;
+    VisCD = false;
+    CD = false;
+    upupaOff = false;
+    upupa(); // avvia la procedura che emette la sequenza di bip
+    seg.displayClear();
+    do { // attende che il touch 3 venga rilasciato
+      button2State = digitalRead(button2Pin);
+    } while (button2State);
+    button2State = false;
+  }
+
+}
+
+void dispCU() {
+
+  seg.suppressLeadingZeroPlaces(0); // visualizza gli zeri non significativi
+  if (CU) {
+    if (millis() - timeColon > 500) { //accende o spegne i due punti
+      seg.displayColon(false);
+    } else {
+      seg.displayColon(true);
+    }
+    ss = (millis() - timep) / 1000;
+    ss = ss - ss / 60 * 60;
+    if (ss != oldss) { //se è passato un secondo
+      if (VisCU) seg.displayTime(mn, ss);
+      timeColon = millis();
+      oldss = ss;
+      if (ss == 59) {
+        mn = mn + 1;
+      }
+    }
+    if (VisCU && mn == 100 && ss == 0) {
+      seg.displayColon(true);
+      mn = 0;
+      VisCU = false;
+      CU = false;
+      seg.displayClear();
+    }
+  }
+  
+}
+
+void dispPesa() {
+
+  for (int i = 1; i < 4; i++) {
+    seg.suppressLeadingZeroPlaces(i); // non visualizza gli zeri non significativi
+  }
+  seg.displayColon(false);
+  mis = scale.get_units(10), 1;
+  seg.displayInt(mis);
+  if (abs(mis - oldmis) > 10) {
+    oldmis = mis;
+    misinfun = true;
+    timeNotPressed = millis();
+  } else {
+    misinfun = false;
+  }
+
+}
+
+void upupa() {
+  for (int i = 0; i < 6; i++) {
+  button2State = digitalRead(button2Pin);
+  if (button2State) {
+    upupaOff = true;
+    return;
+  }
+  tone(buzzer, 2500); // Suono 2,5KHz
+  delay(75);          // per 75 ms
+  noTone(buzzer);     // ferma il suono
+  button2State = digitalRead(button2Pin);
+  if (button2State) {
+    upupaOff = true;
+    return;
+  }
+  delay(75);          // silenzio per 75 ms
+  button2State = digitalRead(button2Pin);
+  if (button2State) {
+    upupaOff = true;
+    return;
+  }
+  tone(buzzer, 2500); // ripete altre 2 volte
+  delay(75);
+  noTone(buzzer);
+  button2State = digitalRead(button2Pin);
+  if (button2State) {
+    upupaOff = true;
+    return;
+  }
+  delay(75);
+  button2State = digitalRead(button2Pin);
+  if (button2State) {
+    upupaOff = true;
+    return;
+  }
+  tone(buzzer, 2500);
+  delay(75);
+  noTone(buzzer);
+  button2State = digitalRead(button2Pin);
+  if (button2State) {
+    upupaOff = true;
+    return;
+  }
+  delay(500);         // silenzio per mezzo sec
+  }
+}
